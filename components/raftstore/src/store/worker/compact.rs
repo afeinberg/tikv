@@ -9,15 +9,25 @@ use std::{
 use engine_traits::{KvEngine, RangeStats, CF_WRITE};
 use fail::fail_point;
 use thiserror::Error;
-use tikv_util::{box_try, error, info, time::Instant, warn, worker::Runnable};
+use tikv_util::{box_try, debug, error, info, time::Instant, warn, worker::Runnable};
 
 use super::metrics::{COMPACT_RANGE_CF, FULL_COMPACT};
 
 type Key = Vec<u8>;
 
-pub enum Task {
-    PeriodicFullCompact,
+type IsLowLoadFn = Box<dyn Fn() -> bool + Send>;
+type WaitForLowLoadFn = Box<dyn Fn() -> Result<(), Error> + Send>;
 
+pub struct CompactLoadController {
+    pub is_low_load: IsLowLoadFn,
+    pub wait_for_low_load: WaitForLowLoadFn,
+}
+
+pub enum Task {
+    PeriodicFullCompact {
+        ranges: Vec<(Key, Key)>,
+        load_checker: Option<CompactLoadController>,
+    },
     Compact {
         cf_name: String,
         start_key: Option<Key>, // None means smallest key
@@ -60,7 +70,19 @@ impl CompactThreshold {
 impl Display for Task {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
-            Task::PeriodicFullCompact => f.debug_struct("FullCompact").finish(),
+            Task::PeriodicFullCompact {
+                ref ranges,
+                ref load_checker,
+            } => f
+                .debug_struct("FullCompact")
+                .field("ranges", ranges)
+                .field(
+                    "load_checker",
+                    &load_checker
+                        .as_ref()
+                        .map(|_| "CompactLoadController".to_owned()),
+                )
+                .finish(),
             Task::Compact {
                 ref cf_name,
                 ref start_key,
@@ -137,16 +159,60 @@ where
     /// TODO: Do not start if there is heavy I/O.
     /// TODO: Make it possible to rate limit, pause, or abort this by compacting
     /// a range at a time.
-    pub fn full_compact(&mut self) -> Result<(), Error> {
+    pub fn full_compact(
+        &mut self,
+        ranges: Vec<(Key, Key)>,
+        controller: Option<CompactLoadController>,
+    ) -> Result<(), Error> {
         fail_point!("on_full_compact");
         info!("full compaction started");
+        let mut ranges: VecDeque<_> = ranges
+            .iter()
+            .map(|(start, end)| (Some(start.as_slice()), Some(end.as_slice())))
+            .collect();
+        if ranges.is_empty() {
+            ranges.push_front((None, None))
+        }
         let timer = Instant::now();
         let full_compact_timer = FULL_COMPACT.start_coarse_timer();
-        box_try!(self.engine.compact_range(
-            None, None, // Compact the entire key range.
-            true, // no other compaction will run when this is running
-            1,    // number of threads threads
-        ));
+        while let Some(range) = ranges.pop_front() {
+            debug!(
+                "incremental range full compaction started";
+            "start_key" => ?range.0.map(log_wrappers::Value::key),
+            "end_key" => ?range.1.map(log_wrappers::Value::key),
+             );
+            box_try!(self.engine.compact_range(
+                range.0, range.1, // Compact the entire key range.
+                true,    // no other compaction will run when this is running
+                1,       // number of threads threads
+            ));
+            debug!(
+                "finished incremental range full compaction";
+                "remaining" => ranges.len(),
+            );
+            if let Some((
+                next_range,
+                CompactLoadController {
+                    is_low_load,
+                    wait_for_low_load,
+                },
+            )) = ranges.front().zip(controller.as_ref())
+            // If controller is specified and more work is remaining...
+            {
+                // Pause if load is too high.
+                if !is_low_load() {
+                    warn!("load is too high. pausing incremental full compaction";
+                            "finished_start_key" => ?range.0.map(log_wrappers::Value::key),
+                            "finished_end_key" => ?range.1.map(log_wrappers::Value::key),
+                            "next_range_start_key" => ?next_range.0.map(log_wrappers::Value::key),
+                            "next_range_end_key" => ?next_range.1.map(log_wrappers::Value::key),
+                            "remaining" => ranges.len(),
+                    );
+                    box_try!(wait_for_low_load());
+                    info!("resuming incremental full compaction");
+                }
+            }
+        }
         full_compact_timer.observe_duration();
         info!(
             "full compaction finished";
@@ -191,8 +257,11 @@ where
 
     fn run(&mut self, task: Task) {
         match task {
-            Task::PeriodicFullCompact => {
-                if let Err(e) = self.full_compact() {
+            Task::PeriodicFullCompact {
+                ranges,
+                load_checker,
+            } => {
+                if let Err(e) = self.full_compact(ranges, load_checker) {
                     error!("periodic full compaction failed"; "err" => %e);
                 }
             }
@@ -522,7 +591,10 @@ mod tests {
             .unwrap();
         assert_eq!(stats.num_entries - stats.num_versions, 5);
 
-        runner.run(Task::PeriodicFullCompact);
+        runner.run(Task::PeriodicFullCompact {
+            ranges: Vec::new(),
+            load_checker: None,
+        });
         let stats = engine
             .get_range_stats(CF_WRITE, &start, &end)
             .unwrap()

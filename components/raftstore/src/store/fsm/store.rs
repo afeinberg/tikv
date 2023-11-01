@@ -102,10 +102,10 @@ use crate::{
         util::{is_initial_msg, RegionReadProgressRegistry},
         worker::{
             AutoSplitController, CleanupRunner, CleanupSstRunner, CleanupSstTask, CleanupTask,
-            CompactRunner, CompactTask, ConsistencyCheckRunner, ConsistencyCheckTask,
-            GcSnapshotRunner, GcSnapshotTask, PdRunner, RaftlogGcRunner, RaftlogGcTask,
-            ReadDelegate, RefreshConfigRunner, RefreshConfigTask, RegionRunner, RegionTask,
-            SplitCheckTask,
+            CompactLoadController, CompactRunner, CompactTask, ConsistencyCheckRunner,
+            ConsistencyCheckTask, GcSnapshotRunner, GcSnapshotTask, PdRunner, RaftlogGcRunner,
+            RaftlogGcTask, ReadDelegate, RefreshConfigRunner, RefreshConfigTask, RegionRunner,
+            RegionTask, SplitCheckTask,
         },
         Callback, CasualMessage, CompactThreshold, GlobalReplicationState, InspectedRaftMessage,
         MergeResultKind, PdTask, PeerMsg, PeerTick, RaftCommand, SignificantMsg, SnapManager,
@@ -122,7 +122,7 @@ pub const MULTI_FILES_SNAPSHOT_FEATURE: Feature = Feature::require(6, 1, 0); // 
 
 // Every 30 minutes, check if we can run full compaction. This allows the config
 // setting `periodic_full_compact_start_max_cpu` to be changed dynamically.
-const PERIODIC_FULL_COMPACT_TICK_INTERVAL_DURATION: Duration = Duration::from_secs(30 * 60);
+const PERIODIC_FULL_COMPACT_TICK_INTERVAL_DURATION: Duration = Duration::from_secs(10 * 60);
 
 pub struct StoreInfo<EK, ER> {
     pub kv_engine: EK,
@@ -2454,6 +2454,42 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         }
     }
 
+    fn is_low_load_for_full_compact(&self) -> impl Fn() -> bool {
+        let max_start_cpu_usage = self.ctx.cfg.periodic_full_compact_start_max_cpu;
+        let global_stat = self.ctx.global_stat.clone();
+        move || {
+            if global_stat.stat.is_busy.load(Ordering::SeqCst) {
+                warn!("full compaction may not run at this time, `is_busy` flag is true",);
+                return false;
+            }
+
+            let mut proc_stats = ProcessStat::cur_proc_stat().unwrap();
+            let cpu_usage = proc_stats.cpu_usage().unwrap();
+            if cpu_usage > max_start_cpu_usage {
+                warn!(
+                    "full compaction may not run at this time, cpu usage is above max";
+                    "cpu_usage" => cpu_usage,
+                    "threshold" => max_start_cpu_usage,
+                );
+                return false;
+            }
+            true
+        }
+    }
+
+    fn ranges_for_full_compact(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let meta = self.ctx.store_meta.lock().unwrap();
+        let mut ranges = Vec::new();
+
+        for region_id in meta.region_ranges.values() {
+            let region = &meta.regions[region_id];
+            let start_key = keys::enc_start_key(region);
+            let end_key = keys::enc_end_key(region);
+            ranges.push((start_key, end_key))
+        }
+        ranges
+    }
+
     fn on_full_compact_tick(&mut self) {
         self.register_full_compact_tick();
 
@@ -2471,30 +2507,27 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
             );
             return;
         }
-
-        if self.ctx.global_stat.stat.is_busy.load(Ordering::SeqCst) {
-            warn!("full compaction may not run at this time, `is_busy` flag is true",);
+        let is_low_load = self.is_low_load_for_full_compact();
+        if !is_low_load() {
             return;
         }
 
-        let mut proc_stats = ProcessStat::cur_proc_stat().unwrap();
-        let cpu_usage = proc_stats.cpu_usage().unwrap();
-        let max_start_cpu_usage = self.ctx.cfg.periodic_full_compact_start_max_cpu;
-        if cpu_usage > max_start_cpu_usage {
-            warn!(
-                "full compaction may not run at this time, cpu usage is above max";
-                "cpu_usage" => cpu_usage,
-                "threshold" => max_start_cpu_usage,
-            );
-            return;
-        }
+        let is_low_load = Box::new(is_low_load);
+        let load_checker = CompactLoadController {
+            is_low_load,
+            wait_for_low_load: Box::new(|| Ok::<(), _>(())),
+        };
 
+        let full_compact_task = CompactTask::PeriodicFullCompact {
+            ranges: self.ranges_for_full_compact(),
+            load_checker: Some(load_checker),
+        };
         // Attempt executing a periodic full compaction.
         // Note that full compaction will not run if other compaction tasks are running.
         if let Err(e) = self
             .ctx
             .cleanup_scheduler
-            .schedule(CleanupTask::Compact(CompactTask::PeriodicFullCompact))
+            .schedule(CleanupTask::Compact(full_compact_task))
         {
             error!(
                 "failed to schedule a periodic full compaction";
