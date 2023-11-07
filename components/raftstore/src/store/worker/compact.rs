@@ -182,7 +182,7 @@ where
                     range.0.unwrap_or(b""),
                     range.1.unwrap_or(keys::DATA_MAX_KEY),
                 );
-                let range_size = box_try!(self.engine.get_range_approximate_size(r, 1_000_000));
+                let range_size = box_try!(self.engine.get_range_approximate_size(r, 512_000_000));
                 rate_limiter.request(IoType::Compaction, IoOp::Read, range_size as usize);
             }
             debug!(
