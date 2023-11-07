@@ -2477,9 +2477,24 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         }
     }
 
+    fn wait_for_low_load_for_full_compact(&self) -> impl Fn() -> Result<()> {
+        const MAX_DELAY_SECONDS: u64 = 60 * 15;
+        let is_low_load = self.is_low_load_for_full_compact();
+        move || {
+            let mut delay_seconds = 1;
+            loop {
+                std::thread::sleep(Duration::from_secs(delay_seconds));
+                if is_low_load() {
+                    return Ok(());
+                }
+                delay_seconds *= u64::max(MAX_DELAY_SECONDS, delay_seconds * 2);
+            }
+        }
+    }
+
     fn ranges_for_full_compact(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let meta = self.ctx.store_meta.lock().unwrap();
-        let mut ranges = Vec::new();
+        let mut ranges = Vec::with_capacity(meta.region_ranges.len());
 
         for region_id in meta.region_ranges.values() {
             let region = &meta.regions[region_id];
@@ -2515,7 +2530,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         let is_low_load = Box::new(is_low_load);
         let load_checker = CompactLoadController {
             is_low_load,
-            wait_for_low_load: Box::new(|| Ok::<(), _>(())),
+            wait_for_low_load: Box::new(self.wait_for_low_load_for_full_compact()),
         };
 
         let full_compact_task = CompactTask::PeriodicFullCompact {

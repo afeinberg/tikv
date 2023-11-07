@@ -6,8 +6,9 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use engine_traits::{KvEngine, RangeStats, CF_WRITE};
+use engine_traits::{KvEngine, Range, RangeStats, CF_WRITE};
 use fail::fail_point;
+use file_system::{get_io_rate_limiter, IoOp, IoType};
 use thiserror::Error;
 use tikv_util::{box_try, debug, error, info, time::Instant, warn, worker::Runnable};
 
@@ -16,7 +17,7 @@ use super::metrics::{COMPACT_RANGE_CF, FULL_COMPACT};
 type Key = Vec<u8>;
 
 type IsLowLoadFn = Box<dyn Fn() -> bool + Send>;
-type WaitForLowLoadFn = Box<dyn Fn() -> Result<(), Error> + Send>;
+type WaitForLowLoadFn = Box<dyn Fn() -> crate::errors::Result<()> + Send>;
 
 pub struct CompactLoadController {
     pub is_low_load: IsLowLoadFn,
@@ -176,6 +177,14 @@ where
         let timer = Instant::now();
         let full_compact_timer = FULL_COMPACT.start_coarse_timer();
         while let Some(range) = ranges.pop_front() {
+            if let Some(rate_limiter) = get_io_rate_limiter() {
+                let r = Range::new(
+                    range.0.unwrap_or(b""),
+                    range.1.unwrap_or(keys::DATA_MAX_KEY),
+                );
+                let range_size = box_try!(self.engine.get_range_approximate_size(r, 1_000_000));
+                rate_limiter.request(IoType::Compaction, IoOp::Read, range_size as usize);
+            }
             debug!(
                 "incremental range full compaction started";
             "start_key" => ?range.0.map(log_wrappers::Value::key),
@@ -183,7 +192,7 @@ where
              );
             box_try!(self.engine.compact_range(
                 range.0, range.1, // Compact the entire key range.
-                true,    // no other compaction will run when this is running
+                false,   // non-exclusive
                 1,       // number of threads threads
             ));
             debug!(
