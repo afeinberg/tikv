@@ -468,10 +468,20 @@ mod tests {
     };
     use keys::data_key;
     use tempfile::Builder;
-    use tikv_util::yatp_pool::{DefaultTicker, YatpPoolBuilder};
+    use tikv_util::yatp_pool::{DefaultTicker, FuturePool, YatpPoolBuilder};
     use txn_types::{Key, TimeStamp, Write, WriteType};
 
     use super::*;
+
+    impl<E> From<E> for Runner<E>
+    where
+        E: KvEngine,
+    {
+        fn from(engine: E) -> Self {
+            let pool = YatpPoolBuilder::new(DefaultTicker::default()).build_future_pool();
+            Runner::new(engine, pool.remote().clone())
+        }
+    }
 
     #[test]
     fn test_compact_range() {
@@ -480,8 +490,7 @@ mod tests {
             .tempdir()
             .unwrap();
         let db = new_engine(path.path().to_str().unwrap(), &[CF_DEFAULT]).unwrap();
-        let pool = YatpPoolBuilder::new(DefaultTicker::default()).build_future_pool();
-        let mut runner = Runner::new(db.clone(), pool.remote().clone());
+        let mut runner = Runner::from(db.clone());
 
         // Generate the first SST file.
         let mut wb = db.write_batch();
@@ -648,8 +657,7 @@ mod tests {
     fn test_full_compact_deletes() {
         let tmp_dir = Builder::new().prefix("test").tempdir().unwrap();
         let engine = open_db(tmp_dir.path().to_str().unwrap());
-        let pool = YatpPoolBuilder::new(DefaultTicker::default()).build_future_pool();
-        let mut runner = Runner::new(engine.clone(), pool.remote().clone());
+        let mut runner = Runner::from(engine.clone());
 
         // mvcc_put 0..5
         for i in 0..5 {
@@ -681,7 +689,7 @@ mod tests {
             ranges: Vec::new(),
             compact_load_controller: FullCompactController::new(0, 0, None),
         });
-        std::thread::sleep(Duration::from_millis(2000));
+        std::thread::sleep(Duration::from_millis(500));
         let stats = engine
             .get_range_stats(CF_WRITE, &start, &end)
             .unwrap()
@@ -693,8 +701,7 @@ mod tests {
     fn test_full_compact_incremental_pausable() {
         let tmp_dir = Builder::new().prefix("test").tempdir().unwrap();
         let engine = open_db(tmp_dir.path().to_str().unwrap());
-        let pool = YatpPoolBuilder::new(DefaultTicker::default()).build_future_pool();
-        let mut runner = Runner::new(engine.clone(), pool.remote().clone());
+        let mut runner = Runner::from(engine.clone());
 
         // mvcc_put 0..100
         for i in 0..100 {
