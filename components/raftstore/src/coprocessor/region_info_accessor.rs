@@ -14,6 +14,7 @@ use collections::{HashMap, HashSet};
 use engine_traits::KvEngine;
 use itertools::Itertools;
 use kvproto::metapb::Region;
+use pd_client::RegionStat;
 use raft::StateRole;
 use tikv_util::{
     box_err, debug, info, warn,
@@ -99,6 +100,7 @@ impl RegionInfo {
 
 type RegionsMap = HashMap<u64, RegionInfo>;
 type RegionRangesMap = BTreeMap<RangeKey, u64>;
+type RegionsStatMap = HashMap<u64, RegionStat>;
 
 // RangeKey is a wrapper used to unify the comparison between region start key
 // and region end key. Region end key is special as empty stands for the
@@ -124,6 +126,11 @@ impl RangeKey {
     }
 }
 
+#[derive(Debug)]
+pub enum RegionSortStrategy {
+    AccessPattern,
+}
+
 pub type Callback<T> = Box<dyn FnOnce(T) + Send>;
 pub type SeekRegionCallback = Box<dyn FnOnce(&mut dyn Iterator<Item = &RegionInfo>) + Send>;
 
@@ -143,6 +150,11 @@ pub enum RegionInfoQuery {
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         callback: Callback<Vec<Region>>,
+    },
+    GetTopRegions {
+        count: usize,
+        strategy: RegionSortStrategy,
+        callback: Callback<Vec<(RegionInfo, RegionStat)>>,
     },
     /// Gets all contents from the collection. Only used for testing.
     DebugDump(mpsc::Sender<(RegionsMap, RegionRangesMap)>),
@@ -166,6 +178,15 @@ impl Display for RegionInfoQuery {
                 &log_wrappers::Value::key(start_key),
                 &log_wrappers::Value::key(end_key)
             ),
+            RegionInfoQuery::GetTopRegions {
+                count, strategy, ..
+            } => {
+                write!(
+                    f,
+                    "GetTopRegions(count: {}, strategy: {:?})",
+                    count, strategy,
+                )
+            }
             RegionInfoQuery::DebugDump(_) => write!(f, "DebugDump"),
         }
     }
@@ -241,6 +262,8 @@ pub struct RegionCollector {
     region_ranges: RegionRangesMap,
 
     region_leaders: Arc<RwLock<HashSet<u64>>>,
+
+    region_stat_map: RegionsStatMap,
 }
 
 impl RegionCollector {
@@ -249,6 +272,7 @@ impl RegionCollector {
             region_leaders,
             regions: HashMap::default(),
             region_ranges: BTreeMap::default(),
+            region_stat_map: RegionsStatMap::default(),
         }
     }
 
@@ -499,6 +523,14 @@ impl RegionCollector {
         callback(regions);
     }
 
+    pub fn handle_get_top_regions(
+        &self,
+        count: usize,
+        strategy: RegionSortStrategy,
+        callback: Box<dyn FnOnce(Vec<(RegionInfo, RegionStat)>)>,
+    ) {
+    }
+
     fn handle_raftstore_event(&mut self, event: RaftStoreEvent) {
         {
             let region = event.get_region();
@@ -570,6 +602,13 @@ impl Runnable for RegionCollector {
                 callback,
             } => {
                 self.handle_get_regions_in_range(start_key, end_key, callback);
+            }
+            RegionInfoQuery::GetTopRegions {
+                count,
+                strategy,
+                callback,
+            } => {
+                todo!()
             }
             RegionInfoQuery::DebugDump(tx) => {
                 tx.send((self.regions.clone(), self.region_ranges.clone()))
