@@ -1494,8 +1494,10 @@ name = "engine_rocks"
 version = "0.0.1"
 dependencies = [
  "api_version",
+ "bytes",
  "case_macros",
  "collections",
+ "crossbeam-skiplist",
  "derive_more",
  "encryption",
  "engine_traits",

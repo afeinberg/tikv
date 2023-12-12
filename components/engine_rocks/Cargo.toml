@@ -26,8 +26,10 @@ nortcheck = []
 
 [dependencies]
 api_version = { workspace = true }
+bytes = "1.0"
 case_macros = { workspace = true }
 collections = { workspace = true }
+crossbeam-skiplist = "0.1"
 derive_more = "0.99.3"
 encryption = { workspace = true }
 engine_traits = { workspace = true }

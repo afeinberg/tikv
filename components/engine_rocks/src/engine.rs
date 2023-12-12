@@ -1,11 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, sync::Arc, ops::Deref};
 
-use engine_traits::{
-    IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SnapCtx, SyncMutable,
-};
-use rocksdb::{DBIterator, Writable, DB};
+use bytes::{Bytes, BytesMut, BufMut};
+use crossbeam_skiplist::SkipMap;
+use engine_traits::{DbVector, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SnapCtx, SyncMutable};
+use rocksdb::{DBIterator, Writable, DB, WriteBatch, WriteOptions};
 
 use crate::{
     db_vector::RocksDbVector, options::RocksReadOptions, r2e, util::get_cf_handle,
@@ -144,10 +144,69 @@ mod trace {
     }
 }
 
+
+#[derive(Debug)]
+pub struct InMemoryDbVector(Bytes);
+
+impl Deref for InMemoryDbVector {
+    type Target=[u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+impl<'a> PartialEq<&'a [u8]> for InMemoryDbVector {
+    fn eq(&self, &other: &&'a [u8]) -> bool {
+        self.0.eq(other)
+    }
+}
+
+impl DbVector for InMemoryDbVector {
+}
+
+fn make_map_key(key: &[u8], seq: u64) -> Bytes {
+    let mut map_key = BytesMut::new();
+    map_key.put(key);
+    map_key.put_u64(seq);
+    map_key.freeze()
+}
+
+pub const IN_MEMORY_DEFAULT_CF: &'static [u8] = b"0";
+
+#[derive(Debug)]
+pub struct ToyInMemoryEngine {
+    cf_to_map: SkipMap<Bytes, Arc<SkipMap<Bytes, Bytes>>>
+}
+
+impl Default for ToyInMemoryEngine {
+
+    fn default() -> ToyInMemoryEngine {
+        ToyInMemoryEngine { cf_to_map: SkipMap::<_, _>::new() }
+    }
+}
+
+impl ToyInMemoryEngine {
+
+    fn cf_handle(&self, cf: &[u8]) -> Arc<SkipMap<Bytes, Bytes>> {
+        let key = Bytes::copy_from_slice(cf);
+        self.cf_to_map.get_or_insert_with(key, || Arc::new(SkipMap::<Bytes, Bytes>::new())).value().clone()
+    }
+
+    pub fn put_cf(&self, cf: &[u8], key: &[u8], value: &[u8], seq: u64) {    
+        self.cf_handle(cf).insert(make_map_key(key, seq), Bytes::copy_from_slice(value));
+    }
+
+    pub fn get_cf(&self, cf: &[u8], key: &[u8], seq: u64) -> Option<Bytes> {
+        self.cf_handle(cf).get(&make_map_key(key, seq)).map(|e| e.value().clone())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RocksEngine {
     db: Arc<DB>,
     support_multi_batch_write: bool,
+    in_memory: Arc<ToyInMemoryEngine>,
     #[cfg(feature = "trace-lifetime")]
     _id: trace::TabletTraceId,
 }
@@ -160,6 +219,7 @@ impl RocksEngine {
             #[cfg(feature = "trace-lifetime")]
             _id: trace::TabletTraceId::new(db.path(), &db),
             db,
+            in_memory: Arc::new(ToyInMemoryEngine::default())
         }
     }
 
@@ -244,12 +304,24 @@ impl Peekable for RocksEngine {
 
 impl SyncMutable for RocksEngine {
     fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.db.put(key, value).map_err(r2e)
+        let batch = WriteBatch::new();
+        batch.put(key, value).map_err(r2e)?;
+        let writeopts = WriteOptions::new();
+        let memory_engine = Arc::clone(&self.in_memory);
+        self.db.write_callback(&batch, &writeopts, |seq| {
+            memory_engine.put_cf(IN_MEMORY_DEFAULT_CF, key, value, seq);
+        }).map_err(r2e)
     }
 
     fn put_cf(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        let handle = get_cf_handle(&self.db, cf)?;
-        self.db.put_cf(handle, key, value).map_err(r2e)
+        let handle: &rocksdb::CFHandle = get_cf_handle(&self.db, cf)?;
+        let batch = WriteBatch::new();
+        batch.put_cf(handle, key, value).map_err(r2e)?;
+        let writeopts = WriteOptions::new();
+        let memory_engine = Arc::clone(&self.in_memory);
+        self.db.write_callback(&batch, &writeopts, |seq| {
+            memory_engine.put_cf(cf.as_bytes(), key, value, seq);
+        }).map_err(r2e)
     }
 
     fn delete(&self, key: &[u8]) -> Result<()> {
