@@ -1,8 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{any::Any, sync::Arc, ops::Deref};
+use std::{
+    any::Any,
+    ops::{Bound, Deref},
+    sync::Arc,
+};
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use crossbeam_skiplist::SkipMap;
 use engine_traits::{DbVector, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SnapCtx, SyncMutable};
 use rocksdb::{DBIterator, Writable, DB, WriteBatch, WriteOptions};
@@ -144,12 +148,11 @@ mod trace {
     }
 }
 
-
 #[derive(Debug)]
 pub struct InMemoryDbVector(Bytes);
 
 impl Deref for InMemoryDbVector {
-    type Target=[u8];
+    type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         self.0.deref()
@@ -162,8 +165,7 @@ impl<'a> PartialEq<&'a [u8]> for InMemoryDbVector {
     }
 }
 
-impl DbVector for InMemoryDbVector {
-}
+impl DbVector for InMemoryDbVector {}
 
 fn make_map_key(key: &[u8], seq: u64) -> Bytes {
     let mut map_key = BytesMut::new();
@@ -176,29 +178,43 @@ pub const IN_MEMORY_DEFAULT_CF: &'static [u8] = b"0";
 
 #[derive(Debug)]
 pub struct ToyInMemoryEngine {
-    cf_to_map: SkipMap<Bytes, Arc<SkipMap<Bytes, Bytes>>>
+    cf_to_map: SkipMap<Bytes, Arc<SkipMap<Bytes, Bytes>>>,
 }
 
 impl Default for ToyInMemoryEngine {
-
     fn default() -> ToyInMemoryEngine {
-        ToyInMemoryEngine { cf_to_map: SkipMap::<_, _>::new() }
+        ToyInMemoryEngine {
+            cf_to_map: SkipMap::<_, _>::new(),
+        }
     }
 }
 
 impl ToyInMemoryEngine {
-
     fn cf_handle(&self, cf: &[u8]) -> Arc<SkipMap<Bytes, Bytes>> {
         let key = Bytes::copy_from_slice(cf);
-        self.cf_to_map.get_or_insert_with(key, || Arc::new(SkipMap::<Bytes, Bytes>::new())).value().clone()
+        self.cf_to_map
+            .get_or_insert_with(key, || Arc::new(SkipMap::<Bytes, Bytes>::new()))
+            .value()
+            .clone()
     }
 
-    pub fn put_cf(&self, cf: &[u8], key: &[u8], value: &[u8], seq: u64) {    
-        self.cf_handle(cf).insert(make_map_key(key, seq), Bytes::copy_from_slice(value));
+    pub fn put_cf(&self, cf: &[u8], key: &[u8], value: &[u8], seq: u64) {
+        self.cf_handle(cf)
+            .insert(make_map_key(key, seq), Bytes::copy_from_slice(value));
     }
 
     pub fn get_cf(&self, cf: &[u8], key: &[u8], seq: u64) -> Option<Bytes> {
-        self.cf_handle(cf).get(&make_map_key(key, seq)).map(|e| e.value().clone())
+        let upper_bound = make_map_key(key, seq);
+        let handle = self.cf_handle(cf);
+        let upper_bound = handle.upper_bound(Bound::Included(&upper_bound));
+
+        upper_bound
+            .filter(|e| {
+                let e_key_and_seq = e.key();
+                let e_key = &e_key_and_seq[..e_key_and_seq.len() - std::mem::size_of::<u64>()];
+                e_key.eq(key)
+            })
+            .map(|e| e.value().clone())
     }
 }
 
@@ -219,7 +235,7 @@ impl RocksEngine {
             #[cfg(feature = "trace-lifetime")]
             _id: trace::TabletTraceId::new(db.path(), &db),
             db,
-            in_memory: Arc::new(ToyInMemoryEngine::default())
+            in_memory: Arc::new(ToyInMemoryEngine::default()),
         }
     }
 
@@ -308,9 +324,11 @@ impl SyncMutable for RocksEngine {
         batch.put(key, value).map_err(r2e)?;
         let writeopts = WriteOptions::new();
         let memory_engine = Arc::clone(&self.in_memory);
-        self.db.write_callback(&batch, &writeopts, |seq| {
-            memory_engine.put_cf(IN_MEMORY_DEFAULT_CF, key, value, seq);
-        }).map_err(r2e)
+        self.db
+            .write_callback(&batch, &writeopts, |seq| {
+                memory_engine.put_cf(IN_MEMORY_DEFAULT_CF, key, value, seq);
+            })
+            .map_err(r2e)
     }
 
     fn put_cf(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
@@ -319,9 +337,11 @@ impl SyncMutable for RocksEngine {
         batch.put_cf(handle, key, value).map_err(r2e)?;
         let writeopts = WriteOptions::new();
         let memory_engine = Arc::clone(&self.in_memory);
-        self.db.write_callback(&batch, &writeopts, |seq| {
-            memory_engine.put_cf(cf.as_bytes(), key, value, seq);
-        }).map_err(r2e)
+        self.db
+            .write_callback(&batch, &writeopts, |seq| {
+                memory_engine.put_cf(cf.as_bytes(), key, value, seq);
+            })
+            .map_err(r2e)
     }
 
     fn delete(&self, key: &[u8]) -> Result<()> {
