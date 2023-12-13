@@ -8,8 +8,11 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crossbeam_skiplist::SkipMap;
-use engine_traits::{DbVector, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SnapCtx, SyncMutable};
-use rocksdb::{DBIterator, Writable, DB, WriteBatch, WriteOptions};
+use engine_traits::{
+    DbVector, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SnapCtx,
+    SnapshotMiscExt, SyncMutable,
+};
+use rocksdb::{DBIterator, Writable, WriteBatch, WriteOptions, DB};
 
 use crate::{
     db_vector::RocksDbVector, options::RocksReadOptions, r2e, util::get_cf_handle,
@@ -174,7 +177,7 @@ fn make_map_key(key: &[u8], seq: u64) -> Bytes {
     map_key.freeze()
 }
 
-pub const IN_MEMORY_DEFAULT_CF: &'static [u8] = b"0";
+pub const IN_MEMORY_DEFAULT_CF: &[u8] = b"0";
 
 #[derive(Debug)]
 pub struct ToyInMemoryEngine {
@@ -299,6 +302,16 @@ impl Peekable for RocksEngine {
     fn get_value_opt(&self, opts: &ReadOptions, key: &[u8]) -> Result<Option<RocksDbVector>> {
         let opt: RocksReadOptions = opts.into();
         let v = self.db.get_opt(key, &opt.into_raw()).map_err(r2e)?;
+        let seq = self.snapshot(None).sequence_number();
+        let from_memory = self
+            .in_memory
+            .get_cf(IN_MEMORY_DEFAULT_CF, key, seq)
+            .map(InMemoryDbVector);
+        assert_eq!(from_memory.is_some(), v.is_some());
+        if let (Some(v_from_mem), Some(v_from_disk)) = (from_memory, &v.as_ref()) {
+            assert_eq!(&v_from_mem as &[u8], v_from_disk as &[u8])
+        }
+
         Ok(v.map(RocksDbVector::from_raw))
     }
 
@@ -314,6 +327,17 @@ impl Peekable for RocksEngine {
             .db
             .get_cf_opt(handle, key, &opt.into_raw())
             .map_err(r2e)?;
+
+        let seq = self.snapshot(None).sequence_number();
+        let from_memory = self
+            .in_memory
+            .get_cf(cf.as_bytes(), key, seq)
+            .map(InMemoryDbVector);
+        assert_eq!(from_memory.is_some(), v.is_some());
+        if let (Some(v_from_mem), Some(v_from_disk)) = (from_memory, &v.as_ref()) {
+            assert_eq!(&v_from_mem as &[u8], v_from_disk as &[u8])
+        }
+
         Ok(v.map(RocksDbVector::from_raw))
     }
 }
