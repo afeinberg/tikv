@@ -308,8 +308,8 @@ impl Peekable for RocksEngine {
             .get_cf(IN_MEMORY_DEFAULT_CF, key, seq)
             .map(InMemoryDbVector);
         assert_eq!(from_memory.is_some(), v.is_some());
-        if let (Some(v_from_mem), Some(v_from_disk)) = (from_memory, &v.as_ref()) {
-            assert_eq!(&v_from_mem as &[u8], v_from_disk as &[u8])
+        if let (Some(v_mem), Some(v_disk)) = (from_memory, v.as_ref()) {
+            assert_eq!(&v_mem as &[u8], v_disk as &[u8])
         }
 
         Ok(v.map(RocksDbVector::from_raw))
@@ -334,8 +334,8 @@ impl Peekable for RocksEngine {
             .get_cf(cf.as_bytes(), key, seq)
             .map(InMemoryDbVector);
         assert_eq!(from_memory.is_some(), v.is_some());
-        if let (Some(v_from_mem), Some(v_from_disk)) = (from_memory, &v.as_ref()) {
-            assert_eq!(&v_from_mem as &[u8], v_from_disk as &[u8])
+        if let (Some(v_mem), Some(v_disk)) = (from_memory, v.as_ref()) {
+            assert_eq!(&v_mem as &[u8], v_disk as &[u8])
         }
 
         Ok(v.map(RocksDbVector::from_raw))
