@@ -10,7 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use crossbeam_skiplist::SkipMap;
 use engine_traits::{
     DbVector, IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SnapCtx,
-    SnapshotMiscExt, SyncMutable,
+    SnapshotMiscExt, SyncMutable, CF_DEFAULT,
 };
 use rocksdb::{DBIterator, Writable, WriteBatch, WriteOptions, DB};
 
@@ -177,7 +177,7 @@ fn make_map_key(key: &[u8], seq: u64) -> Bytes {
     map_key.freeze()
 }
 
-pub const IN_MEMORY_DEFAULT_CF: &[u8] = b"0";
+pub const IN_MEMORY_DEFAULT_CF: &[u8] = CF_DEFAULT.as_bytes();
 
 #[derive(Debug)]
 pub struct ToyInMemoryEngine {
@@ -225,7 +225,7 @@ impl ToyInMemoryEngine {
 pub struct RocksEngine {
     db: Arc<DB>,
     support_multi_batch_write: bool,
-    in_memory: Arc<ToyInMemoryEngine>,
+    pub in_memory: Arc<ToyInMemoryEngine>,
     #[cfg(feature = "trace-lifetime")]
     _id: trace::TabletTraceId,
 }
@@ -297,9 +297,9 @@ impl Iterable for RocksEngine {
 }
 
 impl Peekable for RocksEngine {
-    type DbVector = RocksDbVector;
+    type DbVector = InMemoryDbVector;
 
-    fn get_value_opt(&self, opts: &ReadOptions, key: &[u8]) -> Result<Option<RocksDbVector>> {
+    fn get_value_opt(&self, opts: &ReadOptions, key: &[u8]) -> Result<Option<InMemoryDbVector>> {
         let opt: RocksReadOptions = opts.into();
         let v = self.db.get_opt(key, &opt.into_raw()).map_err(r2e)?;
         let seq = self.snapshot(None).sequence_number();
@@ -308,11 +308,11 @@ impl Peekable for RocksEngine {
             .get_cf(IN_MEMORY_DEFAULT_CF, key, seq)
             .map(InMemoryDbVector);
         assert_eq!(from_memory.is_some(), v.is_some());
-        if let (Some(v_mem), Some(v_disk)) = (from_memory, v.as_ref()) {
-            assert_eq!(&v_mem as &[u8], v_disk as &[u8])
+        if let (Some(v_mem), Some(v_disk)) = (from_memory.as_ref(), v) {
+            assert_eq!(v_mem as &[u8], &v_disk as &[u8])
         }
 
-        Ok(v.map(RocksDbVector::from_raw))
+        Ok(from_memory)
     }
 
     fn get_value_cf_opt(
@@ -320,7 +320,7 @@ impl Peekable for RocksEngine {
         opts: &ReadOptions,
         cf: &str,
         key: &[u8],
-    ) -> Result<Option<RocksDbVector>> {
+    ) -> Result<Option<InMemoryDbVector>> {
         let opt: RocksReadOptions = opts.into();
         let handle = get_cf_handle(&self.db, cf)?;
         let v = self
@@ -334,11 +334,11 @@ impl Peekable for RocksEngine {
             .get_cf(cf.as_bytes(), key, seq)
             .map(InMemoryDbVector);
         assert_eq!(from_memory.is_some(), v.is_some());
-        if let (Some(v_mem), Some(v_disk)) = (from_memory, v.as_ref()) {
-            assert_eq!(&v_mem as &[u8], v_disk as &[u8])
+        if let (Some(v_mem), Some(v_disk)) = (from_memory.as_ref(), v) {
+            assert_eq!(v_mem as &[u8], &v_disk as &[u8])
         }
 
-        Ok(v.map(RocksDbVector::from_raw))
+        Ok(from_memory)
     }
 }
 

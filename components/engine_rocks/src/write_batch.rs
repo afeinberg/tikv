@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use engine_traits::{self, Mutable, Result, WriteBatchExt, WriteOptions};
+use bytes::Bytes;
+use engine_traits::{self, Mutable, Result, WriteBatchExt, WriteOptions, CF_DEFAULT};
 use rocksdb::{Writable, WriteBatch as RawWriteBatch, DB};
 
-use crate::{engine::RocksEngine, options::RocksWriteOptions, r2e, util::get_cf_handle};
+use crate::{engine::RocksEngine, options::RocksWriteOptions, r2e, util::get_cf_handle, ToyInMemoryEngine};
 
 const WRITE_BATCH_MAX_BATCH_NUM: usize = 16;
 const WRITE_BATCH_MAX_KEY_NUM: usize = 16;
@@ -18,6 +19,7 @@ impl WriteBatchExt for RocksEngine {
     fn write_batch(&self) -> RocksWriteBatchVec {
         RocksWriteBatchVec::new(
             Arc::clone(self.as_inner()),
+            Arc::clone(&self.in_memory),
             WRITE_BATCH_MAX_KEY_NUM,
             1,
             self.support_multi_batch_write(),
@@ -39,16 +41,19 @@ impl WriteBatchExt for RocksEngine {
 /// stable and becomes compatible with Titan.
 pub struct RocksWriteBatchVec {
     db: Arc<DB>,
+    in_memory: Arc<ToyInMemoryEngine>,
     wbs: Vec<RawWriteBatch>,
     save_points: Vec<usize>,
     index: usize,
     batch_size_limit: usize,
     support_write_batch_vec: bool,
+    in_memory_wbs: Vec<(Bytes, Bytes, Bytes)>,
 }
 
 impl RocksWriteBatchVec {
     pub fn new(
         db: Arc<DB>,
+        in_memory: Arc<ToyInMemoryEngine>,
         batch_size_limit: usize,
         cap: usize,
         support_write_batch_vec: bool,
@@ -56,17 +61,20 @@ impl RocksWriteBatchVec {
         let wb = RawWriteBatch::with_capacity(cap);
         RocksWriteBatchVec {
             db,
+            in_memory,
             wbs: vec![wb],
             save_points: vec![],
             index: 0,
             batch_size_limit,
             support_write_batch_vec,
+            in_memory_wbs: Vec::new(),
         }
     }
 
     pub fn with_unit_capacity(engine: &RocksEngine, cap: usize) -> RocksWriteBatchVec {
         Self::new(
             engine.as_inner().clone(),
+            engine.in_memory.clone(),
             WRITE_BATCH_MAX_KEY_NUM,
             cap,
             engine.support_multi_batch_write(),
@@ -106,6 +114,9 @@ impl RocksWriteBatchVec {
             self.get_db()
                 .multi_batch_write_callback(self.as_inner(), &opt.into_raw(), |s| {
                     seq = s;
+                    for (cf, k, v) in self.in_memory_wbs.iter() {
+                        self.in_memory.put_cf(cf, k, v, seq)
+                    }
                     cb();
                 })
                 .map_err(r2e)?;
@@ -113,6 +124,9 @@ impl RocksWriteBatchVec {
             self.get_db()
                 .write_callback(&self.wbs[0], &opt.into_raw(), |s| {
                     seq = s;
+                    for (cf, k, v) in self.in_memory_wbs.iter() {
+                        self.in_memory.put_cf(cf, k, v, seq)
+                    }
                     cb();
                 })
                 .map_err(r2e)?;
@@ -202,13 +216,25 @@ impl engine_traits::WriteBatch for RocksWriteBatchVec {
 impl Mutable for RocksWriteBatchVec {
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.check_switch_batch();
-        self.wbs[self.index].put(key, value).map_err(r2e)
+        self.wbs[self.index].put(key, value).map_err(r2e)?;
+        self.in_memory_wbs.push((
+            Bytes::copy_from_slice(CF_DEFAULT.as_bytes()),
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value)
+        ));
+        Ok(())
     }
 
     fn put_cf(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
         self.check_switch_batch();
         let handle = get_cf_handle(self.db.as_ref(), cf)?;
-        self.wbs[self.index].put_cf(handle, key, value).map_err(r2e)
+        self.wbs[self.index].put_cf(handle, key, value).map_err(r2e)?;
+        self.in_memory_wbs.push((
+            Bytes::copy_from_slice(cf.as_bytes()),
+            Bytes::copy_from_slice(key),
+            Bytes::copy_from_slice(value)
+        ));
+        Ok(())
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<()> {
