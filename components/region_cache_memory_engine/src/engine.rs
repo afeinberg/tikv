@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use collections::HashMap;
 use engine_traits::{
     CfNamesExt, DbVector, Error, IterOptions, Iterable, Iterator, Mutable, Peekable, ReadOptions,
@@ -25,6 +25,23 @@ fn cf_to_id(cf: &str) -> usize {
         CF_WRITE => 2,
         _ => panic!("unrecognized cf {}", cf),
     }
+}
+
+const ENC_KEY_SEQ_LENGTH: usize = std::mem::size_of::<u64>();
+
+#[inline]
+fn encode_key(key: &[u8], seq: u64) -> Bytes {
+    let mut encoded_key = BytesMut::with_capacity(key.len() + ENC_KEY_SEQ_LENGTH);
+    encoded_key.put(key);
+    encoded_key.put_u64(seq);
+    encoded_key.freeze()
+}
+
+#[inline]
+fn decode_key(encoded_key: &Bytes) -> &[u8] {
+    debug_assert!(encoded_key.len() >= ENC_KEY_SEQ_LENGTH);
+    let seq_offset = encoded_key.len() - ENC_KEY_SEQ_LENGTH;
+    &encoded_key[..seq_offset]
 }
 
 /// RegionMemoryEngine stores data for a specific cached region
@@ -188,6 +205,7 @@ pub struct RegionCacheIterator {
     // The lower bound is inclusive while the upper bound is exclusive if set
     lower_bound: Vec<u8>,
     upper_bound: Vec<u8>,
+    seq: u64,
 }
 
 impl Iterable for RegionCacheMemoryEngine {
@@ -205,7 +223,7 @@ impl Iterable for RegionCacheMemoryEngine {
 impl Iterator for RegionCacheIterator {
     fn key(&self) -> &[u8] {
         assert!(self.valid);
-        self.iter.key().as_slice()
+        decode_key(self.iter.key())
     }
 
     fn value(&self) -> &[u8] {
@@ -216,7 +234,7 @@ impl Iterator for RegionCacheIterator {
     fn next(&mut self) -> Result<bool> {
         assert!(self.valid);
         self.iter.next();
-        self.valid = self.iter.valid() && self.iter.key().as_slice() < self.upper_bound.as_slice();
+        self.valid = self.iter.valid() && decode_key(self.iter.key()) < self.upper_bound.as_slice();
 
         if self.valid && self.prefix_same_as_start {
             // todo(SpadeA): support prefix seek
@@ -228,7 +246,8 @@ impl Iterator for RegionCacheIterator {
     fn prev(&mut self) -> Result<bool> {
         assert!(self.valid);
         self.iter.prev();
-        self.valid = self.iter.valid() && self.iter.key().as_slice() >= self.lower_bound.as_slice();
+        self.valid =
+            self.iter.valid() && decode_key(self.iter.key()) >= self.lower_bound.as_slice();
         if self.valid && self.prefix_same_as_start {
             // todo(SpadeA): support prefix seek
             unimplemented!()
@@ -242,8 +261,17 @@ impl Iterator for RegionCacheIterator {
         } else {
             key
         };
-        self.iter.seek(seek_key);
-        self.valid = self.iter.valid() && self.iter.key().as_slice() < self.upper_bound.as_slice();
+        self.iter.seek_for_prev(&encode_key(seek_key, self.seq));
+        if self.iter.valid() && decode_key(self.iter.key()) < seek_key {
+            self.iter.next()
+        }
+
+        self.valid = if self.iter.valid() {
+            let decoded_key = decode_key(self.iter.key());
+            seek_key <= decoded_key && decoded_key < self.upper_bound.as_slice()
+        } else {
+            false
+        };
 
         if self.valid && self.prefix_same_as_start {
             // todo(SpadeA): support prefix seek
@@ -259,8 +287,9 @@ impl Iterator for RegionCacheIterator {
         } else {
             key
         };
-        self.iter.seek_for_prev(end);
-        self.valid = self.iter.valid() && self.iter.key().as_slice() >= self.lower_bound.as_slice();
+        self.iter.seek_for_prev(&encode_key(end, self.seq));
+        self.valid =
+            self.iter.valid() && decode_key(self.iter.key()) >= self.lower_bound.as_slice();
 
         if self.valid && self.prefix_same_as_start {
             // todo(SpadeA): support prefix seek
@@ -414,6 +443,7 @@ impl Iterable for RegionCacheSnapshot {
             lower_bound: lower_bound.unwrap(),
             upper_bound: upper_bound.unwrap(),
             iter,
+            seq: self.sequence_number(),
         })
     }
 }
@@ -431,10 +461,21 @@ impl Peekable for RegionCacheSnapshot {
         cf: &str,
         key: &[u8],
     ) -> Result<Option<Self::DbVector>> {
-        Ok(self.region_memory_engine.data[cf_to_id(cf)]
-            .get(key)
-            .cloned()
-            .map(|v| RegionCacheDbVector(v)))
+        let seq = self.sequence_number();
+        let mut iter = self.region_memory_engine.data[cf_to_id(cf)].iter();
+
+        iter.seek_for_prev(&encode_key(key, seq));
+        let value = if !iter.valid() {
+            None
+        } else {
+            let decoded_key = decode_key(iter.key());
+            if decoded_key != key {
+                None
+            } else {
+                Some(RegionCacheDbVector(iter.value().clone()))
+            }
+        };
+        Ok(value)
     }
 }
 
@@ -480,7 +521,7 @@ mod tests {
     };
     use skiplist_rs::{ByteWiseComparator, Skiplist};
 
-    use super::{cf_to_id, RegionCacheIterator};
+    use super::*;
     use crate::RegionCacheMemoryEngine;
 
     #[test]
@@ -559,7 +600,7 @@ mod tests {
         for i in range {
             let key = construct_key(i);
             let val = construct_value(i);
-            sl.put(Bytes::from(key), Bytes::from(val));
+            sl.put(encode_key(key.as_bytes(), 0), Bytes::from(val));
         }
     }
 
@@ -630,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn test_iterator_forawrd() {
+    fn test_iterator_forward() {
         let engine = RegionCacheMemoryEngine::default();
         engine.new_region(1);
         let step: i32 = 2;
