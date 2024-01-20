@@ -5,6 +5,7 @@ use tikv_util::box_err;
 use crate::{
     engine::{cf_to_id, SkiplistEngine},
     keys::{encode_key, ValueType},
+    range_manager::RangeManager,
     RangeCacheMemoryEngine,
 };
 
@@ -67,6 +68,25 @@ impl RangeCacheWriteBatch {
             .map(|e| (e.cf.as_str(), e.encode(seq)))
             .try_for_each(|(cf, (key, value))| (self.apply_cb)(cf, key, value))
     }
+
+    fn engine(&self) -> &RangeCacheMemoryEngine {
+        unimplemented!()
+    }
+
+    fn write_impl2(&mut self, seq: u64) -> Result<()> {
+        let buffer2: Vec<RangeCacheWriteBatchEntry2> = vec![];
+        let (engine, filtered_keys) = {
+            let core = self.engine().core().lock().unwrap();
+            (
+                core.engine().clone(),
+                buffer2
+                    .iter()
+                    .filter(|&e| e.is_cached(core.range_manager()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        filtered_keys.into_iter().try_for_each(|e| Ok(()))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +95,27 @@ enum CacheWriteBatchEntryMutation {
     Deletion,
 }
 
+#[derive(Clone, Debug)]
+enum CacheWriteBatchEntryMutation2 {
+    PutValue(Bytes, Bytes),
+    Deletion(Bytes),
+    DeleteRange(Bytes, Bytes),
+}
+
+impl CacheWriteBatchEntryMutation2 {
+    pub(crate) fn is_cached(&self, range_manager: &RangeManager) -> bool {
+        todo!()
+    }
+
+    pub(crate) fn apply(&self, engine: &SkiplistEngine, cf_id: usize, seq: u64) -> Result<()> {
+        let cf_handle = &engine.data[cf_id];
+        match self {
+            CacheWriteBatchEntryMutation2::PutValue(key, val) => todo!(),
+            CacheWriteBatchEntryMutation2::Deletion(key) => todo!(),
+            CacheWriteBatchEntryMutation2::DeleteRange(range_start, range_end) => todo!(),
+        }
+    }
+}
 impl CacheWriteBatchEntryMutation {
     fn encode(&self, key: &[u8], seq: u64) -> (Bytes, Bytes) {
         match self {
@@ -98,6 +139,18 @@ struct RangeCacheWriteBatchEntry {
     cf: String,
     key: Bytes,
     mutation: CacheWriteBatchEntryMutation,
+}
+
+#[derive(Clone, Debug)]
+struct RangeCacheWriteBatchEntry2 {
+    cf_id: usize,
+    mutation: CacheWriteBatchEntryMutation2,
+}
+
+impl RangeCacheWriteBatchEntry2 {
+    fn is_cached(&self, range_manager: &RangeManager) -> bool {
+        self.mutation.is_cached(range_manager)
+    }
 }
 
 impl RangeCacheWriteBatchEntry {
@@ -128,8 +181,21 @@ impl RangeCacheWriteBatchEntry {
 }
 impl RangeCacheMemoryEngine {
     fn apply_cb(&self) -> ApplyEncodedEntryCb {
-        // TODO: use the stabilized API for appending to the skip list here.
-        Box::new(|_cf, _key, _value| Ok(()))
+        let core = self.core().clone();
+        let engine = {
+            let core = self.core().lock().unwrap();
+            core.engine().clone()
+        };
+        Box::new(move |cf, key, value| {
+            let contains_key = {
+                let core = core.lock().unwrap();
+                core.range_manager().contains(&key)
+            };
+            if contains_key {
+                engine.data[cf_to_id(cf)].put(key, value);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -295,7 +361,7 @@ mod tests {
             core.mut_range_manager().set_safe_ts(&r, 10);
             core.engine()
         };
-        let mut wb = RangeCacheWriteBatch::from(&engine_for_writes);
+        let mut wb = engine.write_batch();
         wb.put(b"aaa", b"bbb").unwrap();
         wb.set_sequence_number(1).unwrap();
         _ = wb.write().unwrap();
