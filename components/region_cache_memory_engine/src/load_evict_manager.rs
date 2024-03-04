@@ -59,9 +59,21 @@ impl LoadEvictManager for RegionInfoLoadEvictManager {
                     .iter()
                     .map(Region::get_id)
                     .collect::<BTreeSet<_>>();
-                // let may_evict_regions =
-                // previous_top_regions.difference(&top_regions).into_iter().map(|&id|
-                // ).collect::<Vec<_>>();
+                let may_evict_ranges = previous_top_regions
+                    .difference(&top_regions)
+                    .into_iter()
+                    .map(|id| {
+                        let region = self.previous_top_regions
+                            .as_ref()
+                            .unwrap()
+                            .get(id)
+                            .unwrap();
+                        CacheRange {
+                            start: region.get_start_key().to_vec(),
+                            end: region.get_end_key().to_vec(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 (must_cache_ranges, Vec::new(), Vec::new())
             } else {
                 let must_cache_ranges = top_regions
