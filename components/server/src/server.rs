@@ -62,9 +62,13 @@ use raftstore::{
     router::{CdcRaftRouter, ServerRaftStoreRouter},
     store::{
         config::RaftstoreConfigManager,
-        fsm::{self, store::{
-            RaftBatchSystem, RaftRouter, StoreMeta, MULTI_FILES_SNAPSHOT_FEATURE, PENDING_MSG_CAP,
-        }},
+        fsm::{
+            self,
+            store::{
+                RaftBatchSystem, RaftRouter, StoreMeta, MULTI_FILES_SNAPSHOT_FEATURE,
+                PENDING_MSG_CAP,
+            },
+        },
         memory::MEMTRACE_ROOT as MEMTRACE_RAFTSTORE,
         snapshot_backup::PrepareDiskSnapObserver,
         AutoSplitController, CheckLeaderRunner, LocalReader, SnapManager, SnapManagerBuilder,
