@@ -8,6 +8,7 @@
 mod background;
 mod engine;
 pub mod keys;
+mod load_evict_manager;
 pub use engine::RangeCacheMemoryEngine;
 pub mod range_manager;
 mod write_batch;

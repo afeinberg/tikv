@@ -57,15 +57,14 @@ use raft_log_engine::RaftLogEngine;
 use raftstore::{
     coprocessor::{
         config::SplitCheckConfigManager, BoxConsistencyCheckObserver, ConsistencyCheckMethod,
-        CoprocessorHost, RawConsistencyCheckObserver, RegionInfoAccessor,
+        CoprocessorHost, RawConsistencyCheckObserver, RegionInfoAccessor, RegionInfoProvider,
     },
     router::{CdcRaftRouter, ServerRaftStoreRouter},
     store::{
         config::RaftstoreConfigManager,
-        fsm,
-        fsm::store::{
+        fsm::{self, store::{
             RaftBatchSystem, RaftRouter, StoreMeta, MULTI_FILES_SNAPSHOT_FEATURE, PENDING_MSG_CAP,
-        },
+        }},
         memory::MEMTRACE_ROOT as MEMTRACE_RAFTSTORE,
         snapshot_backup::PrepareDiskSnapObserver,
         AutoSplitController, CheckLeaderRunner, LocalReader, SnapManager, SnapManagerBuilder,
@@ -515,6 +514,7 @@ where
             engines.kv.clone(),
             self.region_info_accessor.region_leaders(),
         );
+        let _x: Box<dyn RegionInfoProvider> = Box::new(self.region_info_accessor.clone());
 
         self.engines = Some(TikvEngines {
             engines,
