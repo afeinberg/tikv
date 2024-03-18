@@ -220,6 +220,8 @@ impl RangeCacheMemoryEngine {
         }
     }
 
+    // pub fn start_region_sync_job()
+
     pub fn new_range(&self, range: CacheRange) {
         let mut core = self.core.write();
         core.range_manager.new_range(range);

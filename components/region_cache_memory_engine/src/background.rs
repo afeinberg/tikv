@@ -10,6 +10,7 @@ use crossbeam::{
 use engine_rocks::RocksSnapshot;
 use engine_traits::{CacheRange, IterOptions, Iterable, Iterator, CF_DEFAULT, CF_WRITE, DATA_CFS};
 use parking_lot::RwLock;
+use pd_client::RpcClient;
 use skiplist_rs::SkipList;
 use slog_global::{error, info, warn};
 use tikv_util::{
@@ -22,6 +23,7 @@ use yatp::Remote;
 use crate::{
     engine::RangeCacheMemoryEngineCore,
     keys::{decode_key, encode_key, encoding_for_filter, InternalBytes, InternalKey, ValueType},
+    region_label::{RegionLabelRulesManager, RegionLabelServiceBuilder},
 };
 
 /// Try to extract the key and `u64` timestamp from `encoded_key`.
@@ -55,6 +57,7 @@ pub struct BgWorkManager {
     worker: Worker,
     scheduler: Scheduler<BackgroundTask>,
     tick_stopper: Option<(JoinHandle<()>, Sender<bool>)>,
+    region_label_manager: Arc<RegionLabelRulesManager>,
 }
 
 impl Drop for BgWorkManager {
@@ -69,7 +72,8 @@ impl Drop for BgWorkManager {
 impl BgWorkManager {
     pub fn new(core: Arc<RwLock<RangeCacheMemoryEngineCore>>, gc_interval: Duration) -> Self {
         let worker = Worker::new("range-cache-background-worker");
-        let runner = BackgroundRunner::new(core.clone());
+        let region_label_manager = Arc::new(RegionLabelRulesManager::default());
+        let runner = BackgroundRunner::new(core.clone(), region_label_manager.clone());
         let scheduler = worker.start("range-cache-engine-background", runner);
 
         let scheduler_clone = scheduler.clone();
@@ -80,7 +84,19 @@ impl BgWorkManager {
             worker,
             scheduler,
             tick_stopper: Some((handle, tx)),
+            region_label_manager,
         }
+    }
+
+    pub fn start_bg_region_sync(&mut self, pd_client: Arc<RpcClient>) {
+        let region_label_manager = Arc::clone(&self.region_label_manager);
+        self.worker.spawn_async_task(async move {
+            let mut region_label_service =
+                RegionLabelServiceBuilder::new(region_label_manager, pd_client)
+                    .build()
+                    .unwrap();
+            region_label_service.watch_region_labels().await
+        });
     }
 
     pub fn schedule_task(&self, task: BackgroundTask) -> Result<(), ScheduleError<BackgroundTask>> {
@@ -133,6 +149,7 @@ impl BgWorkManager {
 pub enum BackgroundTask {
     GcTask(GcTask),
     LoadTask,
+    LoadLabeledRegions,
 }
 
 #[derive(Debug)]
@@ -145,6 +162,7 @@ impl Display for BackgroundTask {
         match self {
             BackgroundTask::GcTask(ref t) => t.fmt(f),
             BackgroundTask::LoadTask => f.debug_struct("LoadTask").finish(),
+            BackgroundTask::LoadLabeledRegions => f.debug_struct("LoadLabeledRegions").finish(),
         }
     }
 }
@@ -160,6 +178,7 @@ impl Display for GcTask {
 #[derive(Clone)]
 struct BackgroundRunnerCore {
     engine: Arc<RwLock<RangeCacheMemoryEngineCore>>,
+    region_label_manager: Arc<RegionLabelRulesManager>,
 }
 
 impl BackgroundRunnerCore {
@@ -294,11 +313,17 @@ impl Drop for BackgroundRunner {
 }
 
 impl BackgroundRunner {
-    pub fn new(engine: Arc<RwLock<RangeCacheMemoryEngineCore>>) -> Self {
+    pub fn new(
+        engine: Arc<RwLock<RangeCacheMemoryEngineCore>>,
+        region_label_manager: Arc<RegionLabelRulesManager>,
+    ) -> Self {
         let range_load_worker = Worker::new("background-range-load-worker");
         let range_load_remote = range_load_worker.remote();
         Self {
-            core: BackgroundRunnerCore { engine },
+            core: BackgroundRunnerCore {
+                engine,
+                region_label_manager,
+            },
             range_load_worker,
             range_load_remote,
         }
@@ -310,6 +335,9 @@ impl Runnable for BackgroundRunner {
 
     fn run(&mut self, task: Self::Task) {
         match task {
+            BackgroundTask::LoadLabeledRegions => {
+                // if let Some(region_label_manager) = self.co
+            }
             BackgroundTask::GcTask(t) => {
                 let ranges = self.core.ranges_for_gc();
                 for range in ranges {
@@ -527,6 +555,7 @@ pub mod tests {
             construct_key, construct_value, encode_key, encode_seek_key, encoding_for_filter,
             InternalBytes, ValueType,
         },
+        region_label::RegionLabelRulesManager,
         RangeCacheMemoryEngine,
     };
 
@@ -743,7 +772,8 @@ pub mod tests {
         assert_eq!(3, element_count(&default));
         assert_eq!(3, element_count(&write));
 
-        let worker = BackgroundRunner::new(engine.core.clone());
+        let label = Arc::new(RegionLabelRulesManager::default());
+        let worker = BackgroundRunner::new(engine.core.clone(), label);
 
         // gc will not remove the latest mvcc put below safe point
         worker.core.gc_range(&range, 14);
@@ -797,7 +827,8 @@ pub mod tests {
         assert_eq!(6, element_count(&default));
         assert_eq!(6, element_count(&write));
 
-        let worker = BackgroundRunner::new(engine.core.clone());
+        let label = Arc::new(RegionLabelRulesManager::default());
+        let worker = BackgroundRunner::new(engine.core.clone(), label);
         let s1 = engine.snapshot(range.clone(), 10, u64::MAX);
         let s2 = engine.snapshot(range.clone(), 11, u64::MAX);
         let s3 = engine.snapshot(range.clone(), 20, u64::MAX);
