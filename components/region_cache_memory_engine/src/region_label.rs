@@ -7,6 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use engine_traits::CacheRange;
 use futures::{
     compat::Future01CompatExt,
     stream::{self, StreamExt},
@@ -131,6 +132,9 @@ impl RegionLabelRulesManager {
             *previous_labels = new_labels.clone();
             (added_len, removed_len)
         }
+    }
+
+    pub fn changes_as_ranges(&self, to_load: &mut Vec<CacheRange>, to_evict: &mut Vec<CacheRange>) {
     }
 }
 

@@ -23,7 +23,7 @@ use yatp::Remote;
 use crate::{
     engine::RangeCacheMemoryEngineCore,
     keys::{decode_key, encode_key, encoding_for_filter, InternalBytes, InternalKey, ValueType},
-    region_label::{RegionLabelRulesManager, RegionLabelServiceBuilder},
+    region_label::{LabelRule, RegionLabelRulesManager, RegionLabelServiceBuilder},
 };
 
 /// Try to extract the key and `u64` timestamp from `encoded_key`.
@@ -336,7 +336,22 @@ impl Runnable for BackgroundRunner {
     fn run(&mut self, task: Self::Task) {
         match task {
             BackgroundTask::LoadLabeledRegions => {
-                //
+                let mut to_load = Vec::<CacheRange>::new();
+                let mut to_evict = Vec::<CacheRange>::new();
+                self.core
+                    .region_label_manager
+                    .changes_as_ranges(&mut to_load, &mut to_evict);
+                if !to_load.is_empty() {
+                    {
+                        let mut engine = self.core.engine.write();
+                        for range in to_load {
+                            if let Err(e) = engine.mut_range_manager().load_range(range) {
+                                // todo!
+                            }
+                        }
+                    }
+                    self.run(BackgroundTask::LoadTask);
+                }
             }
             BackgroundTask::GcTask(t) => {
                 let ranges = self.core.ranges_for_gc();
