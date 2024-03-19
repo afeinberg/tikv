@@ -110,6 +110,8 @@ impl BgWorkManager {
         let (tx, rx) = bounded(0);
         let h = std::thread::spawn(move || {
             let ticker = tick(gc_interval);
+            // TODO: clean up this hack.
+            let load_from_labels_ticker = tick(Duration::from_secs(60 * 5));
             loop {
                 select! {
                     recv(ticker) -> _ => {
@@ -125,6 +127,18 @@ impl BgWorkManager {
                         if let Err(e) = scheduler.schedule(BackgroundTask::GcTask(GcTask {safe_point})) {
                             error!(
                                 "schedule range cache engine gc failed";
+                                "err" => ?e,
+                            );
+                        }
+                    },
+                    recv(load_from_labels_ticker) -> _ => {
+                        if scheduler.is_busy() {
+                            info!("range cache engine load from region labels worker is busy, jump to next load from region labels duration");
+                            continue;
+                        }
+                        if let Err(e) = scheduler.schedule(BackgroundTask::LoadLabeledRegions) {
+                            error!(
+                                "schedule load from region labels failed";
                                 "err" => ?e,
                             );
                         }

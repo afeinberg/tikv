@@ -134,7 +134,29 @@ impl RegionLabelRulesManager {
         }
     }
 
-    pub fn changes_as_ranges(&self, to_load: &mut Vec<CacheRange>, to_evict: &mut Vec<CacheRange>) {
+    pub fn changes_as_ranges(
+        &self,
+        to_load: &mut Vec<CacheRange>,
+        _to_evict: &mut Vec<CacheRange>,
+    ) {
+        let mut labels_added = Vec::new();
+        let mut labels_removed = Vec::new();
+        let _counts = self.changes(&mut labels_added, &mut labels_removed);
+        for label_added in labels_added {
+            if label_added
+                .labels
+                .iter()
+                .any(|e| e.key == "cache" && e.value == "always")
+            {
+                for key_range in label_added.data {
+                    let start_key = hex::decode(&key_range.start_key).unwrap();
+                    let end_key = hex::decode(&key_range.end_key).unwrap();
+                    let cache_range = CacheRange::new(start_key, end_key);
+                    to_load.push(cache_range)
+                }
+            }
+            // todo: to evict.
+        }
     }
 }
 

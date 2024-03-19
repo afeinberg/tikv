@@ -4593,6 +4593,7 @@ dependencies = [
  "engine_traits",
  "fail",
  "futures 0.3.15",
+ "hex 0.4.2",
  "keys",
  "kvproto",
  "log_wrappers",
