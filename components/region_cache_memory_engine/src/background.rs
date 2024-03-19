@@ -336,7 +336,7 @@ impl Runnable for BackgroundRunner {
     fn run(&mut self, task: Self::Task) {
         match task {
             BackgroundTask::LoadLabeledRegions => {
-                // if let Some(region_label_manager) = self.co
+                //
             }
             BackgroundTask::GcTask(t) => {
                 let ranges = self.core.ranges_for_gc();

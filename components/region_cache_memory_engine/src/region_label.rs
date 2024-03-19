@@ -1,6 +1,10 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use dashmap::DashMap;
 use futures::{
@@ -49,9 +53,18 @@ pub struct KeyRangeRule {
 }
 
 // Todo: more efficient way to do this for cache use case?
-#[derive(Default)]
 pub struct RegionLabelRulesManager {
     pub(crate) region_labels: DashMap<String, LabelRule>,
+    previous_labels: Arc<Mutex<HashMap<String, LabelRule>>>,
+}
+
+impl Default for RegionLabelRulesManager {
+    fn default() -> Self {
+        Self {
+            region_labels: DashMap::default(),
+            previous_labels: Arc::new(Mutex::new(HashMap::default())),
+        }
+    }
 }
 
 impl RegionLabelRulesManager {
@@ -75,9 +88,54 @@ impl RegionLabelRulesManager {
             .get(label_rule_id)
             .map(|r| r.value().clone())
     }
+
+    pub fn changes(
+        &self,
+        added: &mut Vec<LabelRule>,
+        removed: &mut Vec<LabelRule>,
+    ) -> (usize, usize) {
+        let mut previous_labels = self.previous_labels.lock().unwrap();
+        let new_labels = self
+            .region_labels
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect::<HashMap<_, _>>();
+        // TODO: optimize this!
+        if previous_labels.is_empty() {
+            *previous_labels = new_labels.clone();
+            let values = new_labels.values();
+            let num_added = values.len();
+            added.extend(values.into_iter().cloned());
+            (num_added, 0)
+        } else {
+            let keys_removed = previous_labels
+                .keys()
+                .filter(|&k| !new_labels.contains_key(k))
+                .collect::<Vec<_>>();
+            let keys_added = new_labels
+                .keys()
+                .filter(|&k| !previous_labels.contains_key(k))
+                .collect::<Vec<_>>();
+            let added_len = keys_added.len();
+            let removed_len = keys_removed.len();
+            added.extend(
+                keys_added
+                    .iter()
+                    .map(|&k| new_labels.get(k).unwrap().clone()),
+            );
+            removed.extend(
+                keys_removed
+                    .iter()
+                    .map(|&k| previous_labels.get(k).unwrap().clone()),
+            );
+            *previous_labels = new_labels.clone();
+            (added_len, removed_len)
+        }
+    }
 }
 
-pub type RuleFilterFn = Arc<dyn Fn(&LabelRule) -> bool + Send + Sync>;
+pub type RuleFilterFn = dyn Fn(&LabelRule) -> bool + Send + Sync;
+pub type ArcRuleFilterFn = Arc<RuleFilterFn>;
 
 #[derive(Clone)]
 pub struct RegionLabelService {
@@ -87,7 +145,7 @@ pub struct RegionLabelService {
     revision: i64,
     cluster_id: u64,
     path_suffix: Option<String>,
-    rule_filter_fn: Option<RuleFilterFn>,
+    rule_filter_fn: Option<ArcRuleFilterFn>,
 }
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(1); // to consistent with pd_client
@@ -96,7 +154,7 @@ pub struct RegionLabelServiceBuilder {
     manager: Arc<RegionLabelRulesManager>,
     pd_client: Arc<RpcClient>,
     path_suffix: Option<String>,
-    rule_filter_fn: Option<RuleFilterFn>,
+    rule_filter_fn: Option<ArcRuleFilterFn>,
 }
 
 impl RegionLabelServiceBuilder {
@@ -117,7 +175,7 @@ impl RegionLabelServiceBuilder {
         self
     }
 
-    pub fn rule_filter_fn(mut self, rule_filter_fn: RuleFilterFn) -> Self {
+    pub fn rule_filter_fn(mut self, rule_filter_fn: ArcRuleFilterFn) -> Self {
         self.rule_filter_fn = Some(rule_filter_fn);
         self
     }
