@@ -1654,7 +1654,8 @@ where
         let disk_engine = factory
             .create_shared_db(&self.core.store_path)
             .unwrap_or_else(|s| fatal!("failed to create kv engine: {}", s));
-        let kv_engine: EK = KvEngineBuilder::build(disk_engine.clone());
+        let kv_engine: EK =
+            KvEngineBuilder::build_with_pd_client(disk_engine.clone(), self.pd_client.clone());
         self.kv_statistics = Some(factory.rocks_statistics());
         let engines = Engines::new(kv_engine, raft_engine);
 

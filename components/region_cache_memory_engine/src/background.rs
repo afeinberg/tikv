@@ -88,7 +88,7 @@ impl BgWorkManager {
         }
     }
 
-    pub fn start_bg_region_sync(&mut self, pd_client: Arc<RpcClient>) {
+    pub fn start_bg_region_sync(&self, pd_client: Arc<RpcClient>) {
         let region_label_manager = Arc::clone(&self.region_label_manager);
         self.worker.spawn_async_task(async move {
             let mut region_label_service =
