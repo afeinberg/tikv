@@ -12,6 +12,7 @@ use futures::{
     compat::Future01CompatExt,
     stream::{self, StreamExt},
 };
+use keys::{data_end_key, data_key};
 use kvproto::meta_storagepb::EventEventType;
 use pd_client::{
     meta_storage::{Checked, Get, MetaStorageClient, Sourced, Watch},
@@ -149,8 +150,8 @@ impl RegionLabelRulesManager {
                 .any(|e| e.key == "cache" && e.value == "always")
             {
                 for key_range in label_added.data {
-                    let start_key = hex::decode(&key_range.start_key).unwrap();
-                    let end_key = hex::decode(&key_range.end_key).unwrap();
+                    let start_key = data_key(&hex::decode(&key_range.start_key).unwrap());
+                    let end_key = data_end_key(&hex::decode(&key_range.end_key).unwrap());
                     let cache_range = CacheRange::new(start_key, end_key);
                     info!("will load"; "cache_range" => ?cache_range);
                     to_load.push(cache_range)

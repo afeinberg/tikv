@@ -32,9 +32,9 @@ fail = "0.5"
 yatp = { workspace = true }
 parking_lot = "0.12"
 hex = "0.4"
+keys = { workspace = true }
 
 [dev-dependencies]
-keys = { workspace = true }
 tempfile = "3.0"
 test_pd = { workspace = true }
 test_pd_client = { workspace = true }
