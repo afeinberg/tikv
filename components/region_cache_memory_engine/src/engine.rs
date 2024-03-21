@@ -19,7 +19,7 @@ use engine_traits::{
 };
 use parking_lot::{lock_api::RwLockUpgradableReadGuard, RwLock, RwLockWriteGuard};
 use skiplist_rs::{base::OwnedIter, SkipList};
-use slog_global::error;
+use slog_global::{error, info};
 use tikv_util::box_err;
 
 use crate::{
@@ -37,6 +37,7 @@ pub(crate) fn cf_to_id(cf: &str) -> usize {
         CF_DEFAULT => 0,
         CF_LOCK => 1,
         CF_WRITE => 2,
+        // CF_RAFT => 3,
         _ => panic!("unrecognized cf {}", cf),
     }
 }
@@ -183,6 +184,7 @@ impl RangeCacheMemoryEngineCore {
         assert_eq!(&r, range);
         range_manager.new_range(r);
         range_manager.set_range_readable(range, true);
+        info!("Completed loading range"; "range" => ?range);
     }
 }
 
@@ -372,7 +374,8 @@ impl RangeCacheEngine for RangeCacheMemoryEngine {
 
     type DiskEngine = RocksEngine;
     fn set_disk_engine(&mut self, disk_engine: Self::DiskEngine) {
-        self.rocks_engine = Some(disk_engine);
+        self.rocks_engine = Some(disk_engine.clone());
+        self.bg_work_manager.set_disk_engine(disk_engine)
     }
 
     fn get_range_for_key(&self, key: &[u8]) -> Option<CacheRange> {

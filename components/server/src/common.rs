@@ -724,6 +724,9 @@ impl KvEngineBuilder for HybridEngine<RocksEngine, RangeCacheMemoryEngine> {
         memory_engine.set_disk_engine(disk_engine.clone());
         memory_engine
             .bg_worker_manager()
+            .set_disk_engine(disk_engine.clone());
+        memory_engine
+            .bg_worker_manager()
             .start_bg_region_sync(pd_client);
         HybridEngine::new(disk_engine, memory_engine)
     }

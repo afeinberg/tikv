@@ -1,13 +1,19 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::BTreeSet, fmt::Display, sync::Arc, thread::JoinHandle, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fmt::Display,
+    sync::{Arc, Mutex},
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crossbeam::{
     channel::{bounded, tick, Sender},
     epoch, select,
 };
-use engine_rocks::RocksSnapshot;
+use engine_rocks::{RocksEngine, RocksSnapshot};
 use engine_traits::{CacheRange, IterOptions, Iterable, Iterator, CF_DEFAULT, CF_WRITE, DATA_CFS};
 use parking_lot::RwLock;
 use pd_client::RpcClient;
@@ -58,6 +64,7 @@ pub struct BgWorkManager {
     scheduler: Scheduler<BackgroundTask>,
     tick_stopper: Option<(JoinHandle<()>, Sender<bool>)>,
     region_label_manager: Arc<RegionLabelRulesManager>,
+    pub rocks_engine: Arc<Mutex<Option<RocksEngine>>>,
 }
 
 impl Drop for BgWorkManager {
@@ -72,8 +79,13 @@ impl Drop for BgWorkManager {
 impl BgWorkManager {
     pub fn new(core: Arc<RwLock<RangeCacheMemoryEngineCore>>, gc_interval: Duration) -> Self {
         let worker = Worker::new("range-cache-background-worker");
+        let rocks_engine = Arc::new(Mutex::new(None));
         let region_label_manager = Arc::new(RegionLabelRulesManager::default());
-        let runner = BackgroundRunner::new(core.clone(), region_label_manager.clone());
+        let runner = BackgroundRunner::new(
+            core.clone(),
+            region_label_manager.clone(),
+            rocks_engine.clone(),
+        );
         let scheduler = worker.start("range-cache-engine-background", runner);
 
         let scheduler_clone = scheduler.clone();
@@ -85,7 +97,13 @@ impl BgWorkManager {
             scheduler,
             tick_stopper: Some((handle, tx)),
             region_label_manager,
+            rocks_engine,
         }
+    }
+
+    pub fn set_disk_engine(&self, disk_engine: RocksEngine) {
+        let mut engine = self.rocks_engine.lock().unwrap();
+        *engine = Some(disk_engine)
     }
 
     pub fn start_bg_region_sync(&self, pd_client: Arc<RpcClient>) {
@@ -111,7 +129,7 @@ impl BgWorkManager {
         let h = std::thread::spawn(move || {
             let ticker = tick(gc_interval);
             // TODO: clean up this hack.
-            let load_from_labels_ticker = tick(Duration::from_secs(60 * 5));
+            let load_from_labels_ticker = tick(Duration::from_secs(60));
             loop {
                 select! {
                     recv(ticker) -> _ => {
@@ -193,6 +211,7 @@ impl Display for GcTask {
 struct BackgroundRunnerCore {
     engine: Arc<RwLock<RangeCacheMemoryEngineCore>>,
     region_label_manager: Arc<RegionLabelRulesManager>,
+    rocks_engine: Arc<Mutex<Option<RocksEngine>>>,
 }
 
 impl BackgroundRunnerCore {
@@ -330,6 +349,7 @@ impl BackgroundRunner {
     pub fn new(
         engine: Arc<RwLock<RangeCacheMemoryEngineCore>>,
         region_label_manager: Arc<RegionLabelRulesManager>,
+        rocks_engine: Arc<Mutex<Option<RocksEngine>>>,
     ) -> Self {
         let range_load_worker = Worker::new("background-range-load-worker");
         let range_load_remote = range_load_worker.remote();
@@ -337,6 +357,7 @@ impl BackgroundRunner {
             core: BackgroundRunnerCore {
                 engine,
                 region_label_manager,
+                rocks_engine,
             },
             range_load_worker,
             range_load_remote,
@@ -359,9 +380,18 @@ impl Runnable for BackgroundRunner {
                     {
                         let mut engine = self.core.engine.write();
                         for range in to_load {
-                            if let Err(_e) = engine.mut_range_manager().load_range(range) {
-                                // todo!
+                            if let Err(e) = engine.mut_range_manager().load_range(range.clone()) {
+                                error!("failed to load"; "range" => ?&range, "err" => ?e);
                             }
+                            let rocks_snap = Arc::new({
+                                use engine_traits::KvEngine;
+                                let e = self.core.rocks_engine.lock().unwrap();
+                                e.as_ref().unwrap().snapshot(None)
+                            });
+                            engine
+                                .mut_range_manager()
+                                .pending_ranges_loading_data
+                                .push_back((range.clone(), rocks_snap));
                         }
                     }
                     self.run(BackgroundTask::LoadTask);
@@ -375,13 +405,16 @@ impl Runnable for BackgroundRunner {
                 self.core.gc_finished();
             }
             BackgroundTask::LoadTask => {
+                info!("LoadTask");
                 let mut core = self.core.clone();
                 let f = async move {
+                    info!("Start range load");
                     let skiplist_engine = {
                         let core = core.engine.read();
                         core.engine().clone()
                     };
                     while let Some((range, snap)) = core.get_range_to_load() {
+                        info!("Loading range"; "range" => ?&range);
                         let iter_opt = IterOptions::new(
                             Some(KeyBuilder::from_vec(range.start.clone(), 0, 0)),
                             Some(KeyBuilder::from_vec(range.end.clone(), 0, 0)),
@@ -564,7 +597,10 @@ impl Filter {
 
 #[cfg(test)]
 pub mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use crossbeam::epoch;
     use engine_rocks::util::new_engine;
@@ -802,7 +838,7 @@ pub mod tests {
         assert_eq!(3, element_count(&write));
 
         let label = Arc::new(RegionLabelRulesManager::default());
-        let worker = BackgroundRunner::new(engine.core.clone(), label);
+        let worker = BackgroundRunner::new(engine.core.clone(), label, Arc::new(Mutex::new(None)));
 
         // gc will not remove the latest mvcc put below safe point
         worker.core.gc_range(&range, 14);
@@ -857,7 +893,7 @@ pub mod tests {
         assert_eq!(6, element_count(&write));
 
         let label = Arc::new(RegionLabelRulesManager::default());
-        let worker = BackgroundRunner::new(engine.core.clone(), label);
+        let worker = BackgroundRunner::new(engine.core.clone(), label, Arc::new(Mutex::new(None)));
         let s1 = engine.snapshot(range.clone(), 10, u64::MAX);
         let s2 = engine.snapshot(range.clone(), 11, u64::MAX);
         let s3 = engine.snapshot(range.clone(), 20, u64::MAX);
