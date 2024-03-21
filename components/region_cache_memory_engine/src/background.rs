@@ -23,7 +23,7 @@ use yatp::Remote;
 use crate::{
     engine::RangeCacheMemoryEngineCore,
     keys::{decode_key, encode_key, encoding_for_filter, InternalBytes, InternalKey, ValueType},
-    region_label::{LabelRule, RegionLabelRulesManager, RegionLabelServiceBuilder},
+    region_label::{RegionLabelRulesManager, RegionLabelServiceBuilder},
 };
 
 /// Try to extract the key and `u64` timestamp from `encoded_key`.
@@ -359,7 +359,7 @@ impl Runnable for BackgroundRunner {
                     {
                         let mut engine = self.core.engine.write();
                         for range in to_load {
-                            if let Err(e) = engine.mut_range_manager().load_range(range) {
+                            if let Err(_e) = engine.mut_range_manager().load_range(range) {
                                 // todo!
                             }
                         }

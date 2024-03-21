@@ -10,8 +10,6 @@ use engine_traits::{
     Result, Snapshot, SnapshotMiscExt, CF_DEFAULT,
 };
 
-use crate::engine_iterator::HybridEngineIterator;
-
 pub struct HybridEngineSnapshot<EK, EC>
 where
     EK: KvEngine,
@@ -68,10 +66,16 @@ where
     EK: KvEngine,
     EC: RangeCacheEngine,
 {
-    type Iterator = HybridEngineIterator<EK, EC>;
-
+    // type Iterator = <<EK as KvEngine>::Snapshot as Iterable>::Iterator;
+    type Iterator = Box<dyn engine_traits::Iterator>;
     fn iterator_opt(&self, cf: &str, opts: IterOptions) -> Result<Self::Iterator> {
-        unimplemented!()
+        Ok(
+            if let Some(region_cache_snap) = self.region_cache_snap.as_ref() {
+                Box::new(region_cache_snap.iterator_opt(cf, opts)?)
+            } else {
+                Box::new(self.disk_snap.iterator_opt(cf, opts)?)
+            },
+        )
     }
 }
 

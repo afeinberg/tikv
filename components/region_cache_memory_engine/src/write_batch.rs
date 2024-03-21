@@ -72,9 +72,9 @@ impl RangeCacheWriteBatch {
     /// Sets the sequence number for this batch. This should only be called
     /// prior to writing the batch.
     pub fn set_sequence_number(&mut self, seq: u64) -> Result<()> {
-        if let Some(seqno) = self.sequence_number {
-            return Err(box_err!("Sequence number {} already set", seqno));
-        };
+        // if let Some(seqno) = self.sequence_number {
+        //    return Err(box_err!("Sequence number {} already set", seqno));
+        //};
         self.sequence_number = Some(seq);
         Ok(())
     }

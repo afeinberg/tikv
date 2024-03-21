@@ -152,6 +152,7 @@ impl RegionLabelRulesManager {
                     let start_key = hex::decode(&key_range.start_key).unwrap();
                     let end_key = hex::decode(&key_range.end_key).unwrap();
                     let cache_range = CacheRange::new(start_key, end_key);
+                    info!("will load"; "cache_range" => ?cache_range);
                     to_load.push(cache_range)
                 }
             }
