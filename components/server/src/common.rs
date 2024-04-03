@@ -715,7 +715,11 @@ impl KvEngineBuilder for HybridEngine<RocksEngine, RangeCacheMemoryEngine> {
         let mut memory_engine = RangeCacheMemoryEngine::new(std::time::Duration::from_secs(180));
         memory_engine.set_disk_engine(disk_engine.clone());
         if let Some(pd_client) = pd_client.as_ref() {
-            memory_engine.set_pd_client(pd_client.clone())
+            memory_engine.start_hint_service(
+                <RangeCacheMemoryEngine as RangeCacheEngine>::RangeHintService::from(
+                    pd_client.clone(),
+                ),
+            )
         }
         HybridEngine::new(disk_engine, memory_engine)
     }
