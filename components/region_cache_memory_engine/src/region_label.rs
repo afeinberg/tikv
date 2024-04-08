@@ -60,11 +60,13 @@ impl TryFrom<&KeyRangeRule> for CacheRange {
     }
 }
 pub type RegionLabelAddedCb = Arc<dyn Fn(&LabelRule) + Send + Sync>;
+pub type RegionLabelRemovedCb = Arc<dyn Fn(LabelRule) + Send + Sync>;
 
 #[derive(Default)]
 pub struct RegionLabelRulesManager {
     pub(crate) region_labels: DashMap<String, LabelRule>,
     pub(crate) region_label_added_cb: Option<RegionLabelAddedCb>,
+    pub(crate) region_label_removed_cb: Option<RegionLabelRemovedCb>,
 }
 
 impl RegionLabelRulesManager {
@@ -92,7 +94,10 @@ impl RegionLabelRulesManager {
     }
 
     pub fn remove_region_label(&self, label_rule_id: &String) {
-        let _ = self.region_labels.remove(label_rule_id);
+        let removed_rule = self.region_labels.remove(label_rule_id);
+        if let Some(((_, removed_rule), cb)) = removed_rule.zip(self.region_label_removed_cb) {
+            cb(removed_rule)
+        }
     }
 
     #[allow(dead_code)]
