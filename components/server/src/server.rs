@@ -1667,6 +1667,8 @@ where
             &self.core.config.range_cache_engine,
             disk_engine.clone(),
             Some(self.pd_client.clone()),
+            Some(self.router.clone()),
+            Some(Arc::new(self.region_info_accessor.clone())),
         );
         self.kv_statistics = Some(factory.rocks_statistics());
         let engines = Engines::new(kv_engine, raft_engine);

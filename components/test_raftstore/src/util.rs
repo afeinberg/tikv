@@ -687,14 +687,20 @@ where
 
     let mut builder = KvEngineFactoryBuilder::new(env, &cfg, cache, key_manager.clone())
         .sst_recovery_sender(Some(scheduler));
-    if let Some(router) = router {
+    if let Some(router) = router.clone() {
         builder = builder.compaction_event_sender(Arc::new(RaftRouterCompactedEventSender {
             router: Mutex::new(router),
         }));
     }
     let factory = builder.build();
     let disk_engine = factory.create_shared_db(dir.path()).unwrap();
-    let kv_engine: EK = KvEngineBuilder::build(&cfg.tikv.range_cache_engine, disk_engine, None);
+    let kv_engine: EK = KvEngineBuilder::build(
+        &cfg.tikv.range_cache_engine,
+        disk_engine,
+        None,
+        router,
+        None,
+    );
     let engines = Engines::new(kv_engine, raft_engine);
     (
         engines,

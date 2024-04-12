@@ -31,6 +31,10 @@ use grpcio::Environment;
 use hybrid_engine::HybridEngine;
 use pd_client::{PdClient, RpcClient};
 use raft_log_engine::RaftLogEngine;
+use raftstore::{
+    coprocessor::{region_info_accessor, RegionInfoProvider},
+    store::RaftRouter,
+};
 use region_cache_memory_engine::{RangeCacheEngineConfig, RangeCacheMemoryEngine};
 use security::SecurityManager;
 use tikv::{
@@ -700,28 +704,34 @@ impl<T: fmt::Display + Send + 'static> Stop for LazyWorker<T> {
 }
 
 pub trait KvEngineBuilder: KvEngine {
-    fn build(
+    fn build<CER: ConfiguredRaftEngine>(
         range_cache_engine_config: &RangeCacheEngineConfig,
         disk_engine: RocksEngine,
         pd_client: Option<Arc<RpcClient>>,
+        raft_router: Option<RaftRouter<Self, CER>>,
+        region_info_accessor: Option<Arc<dyn RegionInfoProvider>>,
     ) -> Self;
 }
 
 impl KvEngineBuilder for RocksEngine {
-    fn build(
+    fn build<CER: ConfiguredRaftEngine>(
         _range_cache_engine_config: &RangeCacheEngineConfig,
         disk_engine: RocksEngine,
         _pd_client: Option<Arc<RpcClient>>,
+        _raft_router: Option<RaftRouter<Self, CER>>,
+        _region_info_accessor: Option<Arc<dyn RegionInfoProvider>>,
     ) -> Self {
         disk_engine
     }
 }
 
 impl KvEngineBuilder for HybridEngine<RocksEngine, RangeCacheMemoryEngine> {
-    fn build(
+    fn build<CER: ConfiguredRaftEngine>(
         range_cache_engine_config: &RangeCacheEngineConfig,
         disk_engine: RocksEngine,
         pd_client: Option<Arc<RpcClient>>,
+        _raft_router: Option<RaftRouter<Self, CER>>,
+        _region_info_accessor: Option<Arc<dyn RegionInfoProvider>>,
     ) -> Self {
         // todo(SpadeA): add config for it
         let mut memory_engine = RangeCacheMemoryEngine::new(range_cache_engine_config);
