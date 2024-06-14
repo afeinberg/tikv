@@ -92,6 +92,7 @@ uuid = { version = "0.8.1", features = ["serde", "v4"] }
 yatp = { workspace = true }
 
 [dev-dependencies]
+criterion = "0.3"
 encryption_export = { workspace = true }
 engine_panic = { workspace = true }
 engine_rocks = { workspace = true }
@@ -100,3 +101,8 @@ hybrid_engine = { workspace = true }
 panic_hook = { workspace = true }
 region_cache_memory_engine = { workspace = true }
 test_sst_importer = { workspace = true }
+
+[[bench]]
+name = "top_regions"
+path = "benches/top_regions.rs"
+harness = false
